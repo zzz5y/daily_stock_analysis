@@ -1,13 +1,15 @@
 import type React from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ApiErrorAlert } from '../components/common';
+import { getParsedApiError } from '../api/error';
 import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
 import { historyApi } from '../api/history';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { validateStockCode } from '../utils/validation';
 import { getRecentStartDate, getTodayInShanghai } from '../utils/format';
 import { useAnalysisStore } from '../stores/analysisStore';
-import { ReportSummary } from '../components/report';
+import { ReportSummary, ReportMarkdown } from '../components/report';
 import { HistoryList } from '../components/history';
 import { TaskPanel } from '../components/tasks';
 import { useTaskStream } from '../hooks';
@@ -17,7 +19,11 @@ import { useTaskStream } from '../hooks';
  * 顶部输入 + 左侧历史 + 右侧报告
  */
 const HomePage: React.FC = () => {
-  const { setLoading, setError: setStoreError } = useAnalysisStore();
+  const {
+    error: analysisError,
+    setLoading,
+    setError: setStoreError,
+  } = useAnalysisStore();
   const navigate = useNavigate();
 
   // 输入状态
@@ -41,6 +47,9 @@ const HomePage: React.FC = () => {
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
   const [duplicateError, setDuplicateError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Markdown 报告抽屉状态
+  const [showMarkdownDrawer, setShowMarkdownDrawer] = useState(false);
 
   // 用于跟踪当前分析请求，避免竞态条件
   const analysisRequestIdRef = useRef<number>(0);
@@ -82,7 +91,7 @@ const HomePage: React.FC = () => {
     onTaskFailed: (task) => {
       updateTask(task);
       // 显示错误提示
-      setStoreError(task.error || '分析失败');
+      setStoreError(getParsedApiError(task.error || '分析失败'));
       // 延迟移除任务
       setTimeout(() => removeTask(task.taskId), 5000);
     },
@@ -150,20 +159,23 @@ const HomePage: React.FC = () => {
         setIsLoadingReport(true);
         try {
           const report = await historyApi.getDetail(firstItem.id);
+          setStoreError(null);
           setSelectedReport(report);
         } catch (err) {
           console.error('Failed to fetch first report:', err);
+          setStoreError(getParsedApiError(err));
         } finally {
           setIsLoadingReport(false);
         }
       }
     } catch (err) {
       console.error('Failed to fetch history:', err);
+      setStoreError(getParsedApiError(err));
     } finally {
       setIsLoadingHistory(false);
       setIsLoadingMore(false);
     }
-  }, [pageSize]);
+  }, [pageSize, setStoreError]);
 
   // 加载更多历史记录
   const handleLoadMore = useCallback(() => {
@@ -173,22 +185,21 @@ const HomePage: React.FC = () => {
   }, [fetchHistory, isLoadingMore, hasMore]);
 
   // 初始加载 - 自动选择第一条（仅挂载时执行一次）
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     fetchHistory(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Background polling: re-fetch history every 30s for CLI-initiated analyses
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const interval = setInterval(() => {
       fetchHistory(false, true, true);
     }, 30_000);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Refresh when tab regains visibility (e.g. user ran main.py in another terminal)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
@@ -197,6 +208,7 @@ const HomePage: React.FC = () => {
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 点击历史项加载报告
@@ -211,11 +223,12 @@ const HomePage: React.FC = () => {
       const report = await historyApi.getDetail(recordId);
       // Ignore result if a newer click has already been issued.
       if (requestId === analysisRequestIdRef.current) {
+        setStoreError(null);
         setSelectedReport(report);
       }
     } catch (err) {
       console.error('Failed to fetch report:', err);
-      setStoreError(err instanceof Error ? err.message : '报告加载失败');
+      setStoreError(getParsedApiError(err));
     }
   };
 
@@ -257,7 +270,7 @@ const HomePage: React.FC = () => {
           // 显示重复任务错误
           setDuplicateError(`股票 ${err.stockCode} 正在分析中，请等待完成`);
         } else {
-          setStoreError(err instanceof Error ? err.message : '分析失败');
+          setStoreError(getParsedApiError(err));
         }
       }
     } finally {
@@ -370,6 +383,12 @@ const HomePage: React.FC = () => {
 
       {/* 右侧报告详情 */}
       <section className="md:col-start-4 md:row-start-2 flex-1 overflow-y-auto overflow-x-auto px-3 md:px-0 md:pl-1 min-w-0 min-h-0">
+        {analysisError ? (
+          <ApiErrorAlert
+            error={analysisError}
+            className="mb-3"
+          />
+        ) : null}
         {isLoadingReport ? (
           <div className="flex flex-col items-center justify-center h-full">
             <div className="w-10 h-10 border-3 border-cyan/20 border-t-cyan rounded-full animate-spin" />
@@ -377,8 +396,8 @@ const HomePage: React.FC = () => {
           </div>
         ) : selectedReport ? (
           <div className="max-w-4xl">
-            {/* Follow-up button */}
-            <div className="flex items-center justify-end mb-2">
+            {/* Action buttons */}
+            <div className="flex items-center justify-end mb-2 gap-2">
               <button
                 disabled={selectedReport.meta.id === undefined}
                 onClick={() => {
@@ -393,6 +412,16 @@ const HomePage: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
                 追问 AI
+              </button>
+              <button
+                disabled={selectedReport.meta.id === undefined}
+                onClick={() => setShowMarkdownDrawer(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple/10 border border-purple/20 text-purple text-sm hover:bg-purple/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                详细报告
               </button>
             </div>
             <ReportSummary data={selectedReport} isHistory />
@@ -411,6 +440,16 @@ const HomePage: React.FC = () => {
           </div>
         )}
       </section>
+
+      {/* Markdown 报告抽屉 */}
+      {showMarkdownDrawer && selectedReport && selectedReport.meta.id && (
+        <ReportMarkdown
+          recordId={selectedReport.meta.id}
+          stockName={selectedReport.meta.stockName || ''}
+          stockCode={selectedReport.meta.stockCode}
+          onClose={() => setShowMarkdownDrawer(false)}
+        />
+      )}
     </div>
   );
 };

@@ -11,9 +11,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.config import get_config
+from src.services.agent_model_service import list_agent_model_deployments
 
 # Tool name -> Chinese display name mapping
 TOOL_DISPLAY_NAMES: Dict[str, str] = {
@@ -55,6 +56,31 @@ class StrategyInfo(BaseModel):
 
 class StrategiesResponse(BaseModel):
     strategies: List[StrategyInfo]
+
+
+class AgentModelDeployment(BaseModel):
+    deployment_id: str
+    model: str
+    provider: str
+    source: str
+    api_base: Optional[str] = None
+    deployment_name: Optional[str] = None
+    is_primary: bool = False
+    is_fallback: bool = False
+
+
+class AgentModelsResponse(BaseModel):
+    models: List[AgentModelDeployment]
+
+
+@router.get("/models", response_model=AgentModelsResponse)
+async def get_agent_models():
+    """Get configured Agent model deployments for frontend selection."""
+    config = get_config()
+    return AgentModelsResponse(
+        models=[AgentModelDeployment(**item) for item in list_agent_model_deployments(config)]
+    )
+
 
 @router.get("/strategies", response_model=StrategiesResponse)
 async def get_strategies():
@@ -144,6 +170,35 @@ async def delete_chat_session(session_id: str):
     from src.storage import get_db
     count = get_db().delete_conversation_session(session_id)
     return {"deleted": count}
+
+
+class SendChatRequest(BaseModel):
+    """Request body for sending chat content to notification channels."""
+
+    content: str = Field(..., min_length=1, max_length=50000)
+    title: Optional[str] = None
+
+
+@router.post("/chat/send")
+async def send_chat_to_notification(request: SendChatRequest):
+    """
+    Send chat session content to configured notification channels.
+    Uses run_in_executor to avoid blocking the event loop.
+    """
+    from src.notification import NotificationService
+
+    loop = asyncio.get_running_loop()
+    success = await loop.run_in_executor(
+        None,
+        lambda: NotificationService().send(request.content),
+    )
+    if not success:
+        return {
+            "success": False,
+            "error": "no_channels",
+            "message": "未配置通知渠道，请先在设置中配置",
+        }
+    return {"success": True}
 
 
 def _build_executor(config, skills: Optional[List[str]] = None):
